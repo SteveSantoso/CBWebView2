@@ -3,7 +3,7 @@
 > 基于微软 Edge **WebView2**（Chromium）的原生 Unreal Engine 集成插件。
 > 在 UMG 与世界空间 3D 控件中嵌入完整网页，支持透明穿透点击、IME 输入与 JavaScript ⇄ 蓝图双向通信。
 >
-> English version: `Developer_Guide_en.md`
+> [English version](https://github.com/SteveSantoso/CBWebView2/blob/main/README.md)
 
 ---
 
