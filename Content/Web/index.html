@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Document</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+    transform-origin: 0 0;
+  }
+
+  .a {
+    position: absolute;
+    left: 100px;
+    top: 100px;
+    width: 200px;
+    height: 200px;
+    background-color: rgba(255, 0, 0, 0.14);
+  }
+
+  .b {
+    position: absolute;
+    left: 400px;
+    top: 100px;
+    width: 200px;
+    height: 200px;
+    background-color: rgba(0, 0, 255, 0.31);
+  }
+
+  /* Input field styling */
+  .input-container {
+    position: absolute;
+    left: 100px;
+    top: 350px;
+    width: 400px;
+  }
+  
+  .input-container input {
+    width: 100%;
+    padding: 8px;
+    font-size: 16px;
+  }
+</style>
+
+<body>
+  <div class="a"></div>
+  <div class="b"></div>
+  <div class="input-container">
+    <input type="text" id="textInput" placeholder="Enter text">
+  </div>
+  <button onclick="myFunction1()">Send a message to UE</button>
+
+</body>
+
+</html>
+<script>
+  // Baseline design resolution (16:9 widescreen)
+  const designWidth = 1920;
+  const designHeight = 1080;
+  let currentScale = 1;
+
+  function updateScale() {
+    const windowWidth = window.innerWidth;
+    const windowHeight = window.innerHeight;
+    
+    // Compute aspect ratios
+    const designRatio = designWidth / designHeight;
+    const windowRatio = windowWidth / windowHeight;
+    
+    if (windowRatio > designRatio) {
+      // The window is wider than the design, so scale by height
+      currentScale = windowHeight / designHeight;
+    } else {
+      // The window is taller than the design, so scale by width
+      currentScale = windowWidth / designWidth;
+    }
+    
+    document.body.style.transform = `scale(${currentScale})`;
+    document.body.style.width = `${designWidth}px`;
+    document.body.style.height = `${designHeight}px`;
+    
+    // Send element positions after scaling
+
+  // Send element positions after a short 0.1 second delay
+  setTimeout(() => {
+      sendElementPositions();
+    }, 100);
+  }
+  
+
+  // Wait until the alert dialog is dismissed
+  function waitForAlertClose() {
+      return new Promise(resolve => {
+          const originalAlert = window.alert;
+          window.alert = function(msg) {
+              originalAlert(msg);
+              window.alert = originalAlert; // Restore the original alert
+              resolve();
+          };
+      });
+  }
+  
+  // UE bridge call
+  function UECall(messageData) {
+
+     
+
+    // Collect positions for the other elements
+    const positions = getScaledElementPositions();
+    // Add alert dialog position info
+   
+    // Get the alert box position and size (handled separately)
+    const alertBox = {
+      x: (window.innerWidth - 400) / 2, // Approximate alert width: 300px
+      y: 0, // Approximate alert height: 150px
+        width: 400,
+        high: 150,
+        type: "alert"
+    };
+    positions.push(alertBox);
+    
+    // Send all position data
+    window.chrome.webview.postMessage({
+        type: "webPosition",
+        position: positions
+    });
+
+    alert(messageData);
+
+    waitForAlertClose().then(() => {
+        sendElementPositions();
+    });
+  }
+  // Get scaled element positions and sizes
+  function getScaledElementPositions() {
+    const elements = [
+      document.querySelector('.a'),
+      document.querySelector('.b'),
+      document.querySelector('.input-container')
+    ];
+    
+    return elements.map(el => {
+      const rect = el.getBoundingClientRect();
+      return {
+        x: rect.left ,
+        y: rect.top ,
+        width: rect.width ,
+        high: rect.height
+      };
+    });
+  }
+  
+  // Send element positions
+  function sendElementPositions() {
+    const positions = getScaledElementPositions();
+    window.chrome.webview.postMessage({
+      type: "webPosition",
+      position: positions
+    });
+  }
+  
+  // Initial scale
+  updateScale();
+  
+  // Recalculate scale when the window size changes
+  window.addEventListener('resize', updateScale);
+
+  // Button click event
+  function myFunction1() {
+    sendElementPositions();
+  }
+  
+  // Element click events
+  document.querySelector('.a').addEventListener('click', () => {
+    window.chrome.webview.postMessage("a")
+  });
+  
+  document.querySelector('.b').addEventListener('click', () => {
+    window.chrome.webview.postMessage("b")
+  });
+</script>

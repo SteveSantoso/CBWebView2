@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>High Resolution Data Panel</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: transparent; 
+            font-family: "Microsoft YaHei", sans-serif;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        #layout {
+            display: flex;
+            width: 100%;
+            height: 100%;
+            justify-content: space-between;
+            pointer-events: none; 
+        }
+        .side-panel {
+            width: 600px;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            padding: 15px;
+            box-sizing: border-box;
+            background: linear-gradient(to right, rgba(0, 15, 30, 0.85) 0%, rgba(0, 15, 30, 0) 100%);
+            pointer-events: auto;
+            transition: transform 0.3s ease;
+        }
+        .side-panel.right {
+            background: linear-gradient(to left, rgba(0, 15, 30, 0.85) 0%, rgba(0, 15, 30, 0) 100%);
+        }
+        .chart-row {
+            display: flex;
+            flex: 1;
+            gap: 15px;
+            width: 100%;
+        }
+        .center-spacer {
+            flex: 1;
+            pointer-events: none;
+        }
+        .chart-box {
+            flex: 1;
+            width: 100%;
+            min-height: 140px; /* Lower minimum height so more content fits */
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(0, 255, 255, 0.1);
+            border-left: 3px solid #00ffff;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+            border-radius: 4px;
+            backdrop-filter: blur(4px);
+            margin-bottom: 0; /* Remove extra margin and rely on gap */
+        }
+        .side-panel.right .chart-box {
+            border-left: 1px solid rgba(0, 255, 255, 0.1);
+            border-right: 3px solid #00ffff;
+        }
+        .chart-title {
+            padding: 10px 0 0 15px;
+            margin: 0;
+            color: #00ffff;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            text-shadow: 0 0 5px rgba(0, 255, 255, 0.5);
+            font-weight: bold;
+        }
+        .chart-content {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+        }
+        .chart-box::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 10px;
+            height: 10px;
+            border-bottom: 2px solid #00ffff;
+            border-right: 2px solid #00ffff;
+        }
+        .side-panel.right .chart-box::after {
+            right: auto; 
+            left: 0;
+            border-right: none;
+            border-left: 2px solid #00ffff;
+        }
+    </style>
+    <!-- Download echarts.min.js into the local content directory if offline use is required -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+</head>
+<body>
+    <div id="layout">
+        <!-- Left panel -->
+        <div class="side-panel left">
+            <div class="chart-row">
+                <div class="chart-box">
+                    <h3 class="chart-title">System Score</h3>
+                    <div id="chart-l-1" class="chart-content"></div>
+                </div>
+                <div class="chart-box">
+                    <h3 class="chart-title">CPU Load History</h3>
+                    <div id="chart-l-2" class="chart-content"></div>
+                </div>
+            </div>
+            <div class="chart-row">
+                <div class="chart-box">
+                    <h3 class="chart-title">Network I/O</h3>
+                    <div id="chart-l-3" class="chart-content"></div>
+                </div>
+                <div class="chart-box">
+                    <h3 class="chart-title">Active Nodes</h3>
+                    <div id="chart-l-4" class="chart-content"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center spacer -->
+        <div class="center-spacer"></div>
+
+        <!-- Right panel -->
+        <div class="side-panel right">
+            <div class="chart-row">
+                <div class="chart-box">
+                    <h3 class="chart-title">Hardware Status</h3>
+                    <div id="chart-r-1" class="chart-content"></div>
+                </div>
+                <div class="chart-box">
+                    <h3 class="chart-title">Disk Usage</h3>
+                    <div id="chart-r-2" class="chart-content"></div>
+                </div>
+            </div>
+            <div class="chart-row">
+                <div class="chart-box">
+                    <h3 class="chart-title">Top Processes</h3>
+                    <div id="chart-r-3" class="chart-content"></div>
+                </div>
+                <div class="chart-box">
+                    <h3 class="chart-title">Data Filter</h3>
+                    <div id="chart-r-4" class="chart-content"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script>
+        const chartInstances = [];
+
+        // Initialization helper
+        function initChart(domId, option) {
+            const dom = document.getElementById(domId);
+            if (!dom) return;
+
+            const chart = echarts.init(dom, 'dark', { 
+                renderer: 'canvas', 
+                useDirtyRect: false 
+                // devicePixelRatio is handled automatically
+            });
+            
+            // Base style overrides
+            if (!option.backgroundColor) option.backgroundColor = 'transparent';
+            if (!option.tooltip) option.tooltip = { trigger: 'axis', backgroundColor: 'rgba(0,0,0,0.8)', borderColor: '#00ffff' };
+            
+            // Shared palette
+            option.color = ['#00ffff', '#0090ff', '#ff9f7f', '#fb7293', '#e062ae', '#e690d1'];
+
+            chart.setOption(option);
+            chartInstances.push(chart);
+            
+            // Bind transparency hit testing
+            setupHitTest(chart);
+            
+            return chart;
+        }
+
+        // -------------------------------------------------------------
+        // Left 1: Gauge
+        // -------------------------------------------------------------
+        initChart('chart-l-1', {
+            series: [{
+                type: 'gauge',
+                radius: '85%',
+                center: ['50%', '55%'],
+                startAngle: 180,
+                endAngle: 0,
+                min: 0,
+                max: 100,
+                splitNumber: 5,
+                axisLine: { lineStyle: { width: 6, color: [[0.3, '#67e0e3'], [0.7, '#37a2da'], [1, '#fd666d']] } },
+                pointer: { icon: 'path://M12.8,0.7l12,40.1H0.7L12.8,0.7z', length: '12%', width: 20, offsetCenter: [0, '-60%'], itemStyle: { color: 'auto' } },
+                axisTick: { length: 12, lineStyle: { color: 'auto', width: 2 } },
+                splitLine: { length: 20, lineStyle: { color: 'auto', width: 5 } },
+                axisLabel: { color: '#fff', fontSize: 10, distance: -40, formatter: function (value) { if (value === 50) return 'GRADE'; return ''; } },
+                title: { offsetCenter: [0, '-20%'], fontSize: 20 },
+                detail: { fontSize: 30, offsetCenter: [0, '0%'], valueAnimation: true, formatter: function (value) { return Math.round(value) + ''; }, color: 'auto' },
+                data: [{ value: 78.5, name: 'Score' }]
+            }]
+        });
+
+        // -------------------------------------------------------------
+        // Left 2: Dynamic traffic area chart
+        // -------------------------------------------------------------
+        let dataL2 = [];
+        let now = new Date();
+        let value = Math.random() * 100;
+        for (let i = 0; i < 60; i++) {
+            dataL2.push({ name: now.toString(), value: [ now.getTime(), Math.round(value) ] });
+            now = new Date(now.getTime() + 1000);
+            value = value + Math.random() * 21 - 10;
+            if (value < 0) value = 0; else if (value > 100) value = 100;
+        }
+
+        const chartL2 = initChart('chart-l-2', {
+            grid: { top: 10, bottom: 20, left: 10, right: 10, containLabel: true },
+            xAxis: { type: 'time', boundaryGap: false, splitLine: { show: false }, axisLabel: { show: false } },
+            yAxis: { type: 'value', boundaryGap: [0, '100%'], splitLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } } },
+            series: [{
+                name: 'Load',
+                type: 'line',
+                smooth: true,
+                symbol: 'none',
+                areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(0, 255, 255, 0.5)' }, { offset: 1, color: 'rgba(0, 255, 255, 0)' }]) },
+                data: dataL2
+            }]
+        });
+
+        // -------------------------------------------------------------
+        // Left 3: Bar chart
+        // -------------------------------------------------------------
+        initChart('chart-l-3', {
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+            grid: { top: 10, bottom: 10, left: 10, right: 30, containLabel: true },
+            xAxis: { type: 'value', splitLine: { show: false } },
+            yAxis: { type: 'category', data: ['WS', 'HTTP', 'UDP', 'TCP'], axisLine: { show: false }, axisTick: { show: false } },
+            series: [{
+                name: 'In', type: 'bar', stack: 'total', label: { show: false },
+                itemStyle: { color: '#00ffff' },
+                data: [320, 302, 301, 334]
+            }, {
+                name: 'Out', type: 'bar', stack: 'total', label: { show: false },
+                itemStyle: { color: 'rgba(255, 255, 255, 0.2)' },
+                data: [120, 132, 101, 134]
+            }]
+        });
+
+        // -------------------------------------------------------------
+        // Left 4: Bubble scatter chart
+        // -------------------------------------------------------------
+        const dataL4 = Array.from({ length: 30 }, () => [
+            Math.random() * 100, 
+            Math.random() * 100, 
+            Math.random() * 20
+        ]);
+        initChart('chart-l-4', {
+            grid: { top: 20, bottom: 20, left: 10, right: 20, containLabel: true },
+            xAxis: { splitLine: { show: false }, axisLine: { lineStyle: { color: '#555' } } },
+            yAxis: { splitLine: { lineStyle: { color: 'rgba(255,255,255,0.05)' } }, axisLine: { show: false } },
+            series: [{
+                symbolSize: function (data) { return Math.sqrt(data[2]) * 4; },
+                data: dataL4,
+                type: 'scatter',
+                itemStyle: {
+                    color: new echarts.graphic.RadialGradient(0.4, 0.3, 1, [
+                        { offset: 0, color: 'rgba(255,255,255,0.8)' },
+                        { offset: 1, color: 'rgba(0,255,255,0.6)' }
+                    ])
+                }
+            }]
+        });
+
+        // -------------------------------------------------------------
+        // Right 1: Radar chart
+        // -------------------------------------------------------------
+        initChart('chart-r-1', {
+            radar: {
+                indicator: [ { name: 'GPU', max: 100 }, { name: 'MEM', max: 100 }, { name: 'SSD', max: 100 }, { name: 'NET', max: 100 }, { name: 'DRAM', max: 100 } ],
+                radius: '65%',
+                center: ['50%', '55%'],
+                splitArea: { areaStyle: { color: ['rgba(0,255,255,0.05)', 'rgba(0,255,255,0.0)'] } }
+            },
+            series: [{
+                type: 'radar',
+                data: [{ 
+                    value: [80, 90, 70, 85, 95], 
+                    name: 'Usage',
+                    itemStyle: { color: '#00ffff' },
+                    areaStyle: { color: 'rgba(0, 255, 255, 0.2)' }
+                }]
+            }]
+        });
+
+        // -------------------------------------------------------------
+        // Right 2: Pie / Nightingale chart
+        // -------------------------------------------------------------
+        initChart('chart-r-2', {
+            legend: { top: '0%', left: 'left', orient: 'vertical', textStyle: { color: '#ccc', fontSize: 10 } },
+            series: [{
+                name: 'Files',
+                type: 'pie',
+                radius: ['30%', '80%'],
+                center: ['60%', '50%'],
+                avoidLabelOverlap: false,
+                roseType: 'radius',
+                itemStyle: { borderRadius: 3, borderColor: 'transparent', borderWidth: 0 },
+                label: { show: false },
+                data: [
+                    { value: 40, name: 'Assets' },
+                    { value: 33, name: 'Cache' },
+                    { value: 28, name: 'Logs' },
+                    { value: 22, name: 'Config' },
+                    { value: 20, name: 'Temp' }
+                ]
+            }]
+        });
+
+        // -------------------------------------------------------------
+        // Right 3: Horizontal bar chart (Top Processes)
+        // -------------------------------------------------------------
+        initChart('chart-r-3', {
+            grid: { top: 5, bottom: 5, left: 5, right: 30, containLabel: true },
+            xAxis: { type: 'value', show: false },
+            yAxis: { 
+                type: 'category', 
+                data: ['UE5-Ed', 'Chrome', 'Node', 'Python', 'OBS'],
+                axisLine: { show: false },
+                axisTick: { show: false },
+                axisLabel: { color: '#00ffff' }
+            },
+            series: [{
+                type: 'bar',
+                data: [92, 85, 60, 45, 30],
+                barWidth: 10,
+                itemStyle: { borderRadius: 5, color: '#00ffff' },
+                backgroundStyle: { color: 'rgba(255,255,255,0.1)' },
+                showBackground: true,
+                label: { show: true, position: 'right', color: '#fff', formatter: '{c}%' }
+            }]
+        });
+
+        // -------------------------------------------------------------
+        // Right 4: Funnel chart
+        // -------------------------------------------------------------
+        initChart('chart-r-4', {
+            series: [{
+                type: 'funnel',
+                left: '10%', top: 10, bottom: 10, width: '80%',
+                min: 0, max: 100,
+                minSize: '0%', maxSize: '100%',
+                sort: 'descending',
+                gap: 2,
+                label: { show: true, position: 'inside', color: '#fff' },
+                itemStyle: { borderColor: '#fff', borderWidth: 1 },
+                data: [
+                    { value: 60, name: 'View' },
+                    { value: 40, name: 'Click' },
+                    { value: 20, name: 'Order' },
+                    { value: 80, name: 'Visit' },
+                    { value: 100, name: 'Show' }
+                ]
+            }]
+        });
+
+
+        // -------------------------------------------------------------
+        // Global logic: resize and update
+        // -------------------------------------------------------------
+        window.addEventListener('resize', () => { 
+            chartInstances.forEach(c => c.resize()); 
+        });
+
+        setInterval(() => {
+            // Update the dynamic chart in the lower-left area
+            chartL2.setOption({ series: [{ data: dataL2 }] });
+            let lastTime = dataL2[dataL2.length - 1].value[0];
+            let lastVal = dataL2[dataL2.length - 1].value[1];
+            let newVal = lastVal + Math.random() * 21 - 10;
+            if (newVal < 0) newVal = 0; else if (newVal > 100) newVal = 100;
+            
+            dataL2.shift();
+            dataL2.push({ name: new Date().toString(), value: [lastTime + 1000, Math.round(newVal)] });
+        }, 1000);
+
+
+        // -------------------------------------------------------------
+        // Hit-test helper
+        // -------------------------------------------------------------
+        function setupHitTest(chart) {
+            setTimeout(() => {
+                const zr = chart.getZr();
+                const canvas = zr.painter.getViewportRoot();
+                if (canvas) {
+                    canvas.customHitTest = function(x, y) {
+                        const rect = this.getBoundingClientRect();
+                        const localX = x - rect.left;
+                        const localY = y - rect.top;
+
+                        // 1. Basic bounding box
+                        if (localX < 0 || localX > rect.width || localY < 0 || localY > rect.height) return false;
+
+                        // 2. Use ZRender to determine whether any drawn element exists at this point
+                        // This is the most accurate approach: grid lines, text, bars, and pie slices all count
+                        // as long as ZRender has rendered something at the coordinate and findHover can resolve it
+                        // (or you can traverse storage manually)
+                        
+                        // chart.getZr() returns the ZRender instance
+                        // zr.storage.getDisplayList() returns all rendered primitives
+                        // ZRender also exposes a handler for hit detection
+                        
+                        // A simple approach is to walk the display list and test contain()
+                        const displayList = zr.storage.getDisplayList();
+                        for (let i = displayList.length - 1; i >= 0; i--) {
+                            const el = displayList[i];
+                            if (!el.ignore && !el.invisible) {
+                                // Some fullscreen transparent background rects may live at zlevel 0 or use specific names and can be filtered,
+                                // but ECharts usually does not draw a fullscreen background unless backgroundColor is set.
+                                // Here backgroundColor is set to 'transparent'.
+                                if (el.contain(localX, localY)) {
+                                    return true; // Hit any visible element
+                                }
+                            }
+                        }
+                        return false;
+                    };
+                }
+            }, 800); // Slightly longer delay so chart rendering can finish
+        }
+
+    </script>
+</body>
+</html>

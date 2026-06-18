@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebView2 Input Test</title>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            overflow: hidden; /* Prevent scrollbars from affecting click handling */
+            background-color: transparent !important;
+        }
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            max-width: 600px;
+            margin: 0 auto;
+            user-select: none;
+        }
+        h1 { margin-top: 0; }
+        .input-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="text"], textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            user-select: none;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            user-select: none;
+        }
+        button:hover { background-color: #0056b3; }
+        #log {
+            margin-top: 20px;
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            background: #222;
+            color: #0f0;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            user-select: none;
+        }
+        .touch-area {
+            width: 100px;
+            height: 100px;
+            background-color: orange;
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            user-select: none;
+        }
+        .touch-area:active { background-color: red; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Input Penetration Test</h1>
+        <p>Use this page to verify keyboard and mouse interactions.</p>
+
+        <div class="input-group">
+            <label for="text-input">Text Input:</label>
+            <input type="text" id="text-input" placeholder="Type here...">
+        </div>
+
+        <div class="input-group">
+            <label for="textarea">Text Area:</label>
+            <textarea id="textarea" rows="3" placeholder="Type longer text here..."></textarea>
+        </div>
+
+        <div class="input-group">
+            <button id="click-btn">Click Me!</button>
+        </div>
+
+        <div class="input-group">
+            <button id="double-click-btn">Double Click Me!</button>
+        </div>
+        
+        <div class="touch-area" id="touch-box">
+            Touch/Click
+        </div>
+
+        <h3>Event Log:</h3>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        const logDiv = document.getElementById('log');
+        
+        function log(msg) {
+            const el = document.createElement('div');
+            el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logDiv.prepend(el);
+            if (logDiv.children.length > 50) logDiv.lastChild.remove();
+        }
+
+        document.addEventListener('keydown', (e) => log(`KeyDown: ${e.key} (Code: ${e.code})`));
+        document.addEventListener('keyup', (e) => log(`KeyUp: ${e.key}`));
+        document.addEventListener('mousedown', (e) => log(`MouseDown: Button ${e.button} at ${e.clientX},${e.clientY}`));
+        document.addEventListener('mouseup', (e) => log(`MouseUp: Button ${e.button}`));
+        document.addEventListener('wheel', (e) => log(`Wheel: Delta ${e.deltaY}`));
+
+        document.getElementById('click-btn').addEventListener('click', () => log('Button Clicked!'));
+        document.getElementById('double-click-btn').addEventListener('dblclick', () => log('Double Click Button Triggered!'));
+        
+        const input = document.getElementById('text-input');
+        input.addEventListener('focus', () => log('Input Focused'));
+        input.addEventListener('blur', () => log('Input Blurred'));
+        input.addEventListener('input', (e) => log(`Input Changed: ${e.target.value}`));
+
+        const touchBox = document.getElementById('touch-box');
+        touchBox.addEventListener('mouseenter', () => touchBox.style.border = '2px solid black');
+        touchBox.addEventListener('mouseleave', () => touchBox.style.border = 'none');
+    </script>
+</body>
+</html>
