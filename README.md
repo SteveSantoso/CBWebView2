@@ -1,4 +1,4 @@
-# CBWebView2 Developer Guide (English)
+# CBWebView2 Developer Guide 
 
 > Native Microsoft Edge **WebView2** (Chromium) integration for Unreal Engine.
 > Embed full web pages in UMG and world-space 3D widgets, with transparency hit-test,
