@@ -6,6 +6,7 @@
 >
 > [中文版](https://github.com/SteveSantoso/CBWebView2/blob/main/Developer_Guide_zh-CN.md)
 > QQ交流群：1038275218
+> (Official link for WebView2)[https://developer.microsoft.com/en-us/microsoft-edge/webview2?form=MA13LH]
 ---
 
 ## Table of Contents
