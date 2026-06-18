@@ -4,7 +4,7 @@
 > Embed full web pages in UMG and world-space 3D widgets, with transparency hit-test,
 > IME input, and a JavaScript ⇄ Blueprint bridge.
 >
-> 中文版: `Developer_Guide_zh-CN.md`
+> [中文版] (https://github.com/SteveSantoso/CBWebView2/blob/main/Developer_Guide_zh-CN.md)
 
 ---
 
