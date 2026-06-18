@@ -5,7 +5,7 @@
 > IME input, and a JavaScript ⇄ Blueprint bridge.
 >
 > [中文版](https://github.com/SteveSantoso/CBWebView2/blob/main/Developer_Guide_zh-CN.md)
-
+> QQ交流群：1038275218
 ---
 
 ## Table of Contents
