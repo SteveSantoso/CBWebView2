@@ -9,7 +9,7 @@
     var PASS_THROUGH_ATTR = 'data-transparent-pass-through';
     var FORCE_INTERACTIVE_ATTR = 'data-transparent-interactive';
     var DEBUG_OVERLAY_ID = 'cbwebview2-transparency-debug';
-    var DEBUG_OVERLAY_DEFAULT_ENABLED = true;
+    var DEBUG_OVERLAY_DEFAULT_ENABLED = false;
     var allowNonInteractiveElementPassthrough = !!window.__cbwebview2TransparencyAllowNonInteractivePassthrough;
 
     var INTERACTIVE_ROLES = {

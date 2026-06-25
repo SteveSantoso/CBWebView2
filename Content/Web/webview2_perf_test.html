@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CBWebView2 Performance Test Page</title>
+<style>
+    /* Keep the page background fully transparent: works with the TextureAlpha pass-through test.
+       On the UE side, set the Widget's BackgroundColor Alpha to 0 to see the pass-through effect. */
+    html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        font: 13px/1.5 "Segoe UI", Consolas, sans-serif;
+        color: #e8e8e8;
+        height: 100%;
+        overflow: hidden;
+        user-select: none;
+    }
+
+    .panel {
+        position: absolute;
+        background: rgba(18, 22, 30, 1);           /* Solid panel: alpha=1, should intercept input */
+        border: 1px solid #3a4a63;
+        border-radius: 8px;
+        padding: 10px 12px;
+        box-sizing: border-box;
+    }
+
+    .panel h3 {
+        margin: 0 0 8px;
+        font-size: 13px;
+        color: #7ec8ff;
+        border-bottom: 1px solid #2a3a53;
+        padding-bottom: 5px;
+    }
+
+    /* Top-left: live stats HUD */
+    #hud { left: 16px; top: 16px; width: 260px; }
+    #hud .row { display: flex; justify-content: space-between; }
+    #hud .val { color: #9aff9a; font-family: Consolas, monospace; }
+    #fpsBig { font: bold 30px Consolas, monospace; color: #9aff9a; text-align: center; margin: 4px 0; }
+
+    /* Top-right: stress controls */
+    #controls { right: 16px; top: 16px; width: 300px; }
+    .ctl { margin: 7px 0; }
+    .ctl label { display: flex; justify-content: space-between; margin-bottom: 2px; }
+    .ctl input[type=range] { width: 100%; }
+    button {
+        background: #2a5b9e; color: #fff; border: 0; border-radius: 4px;
+        padding: 6px 10px; margin: 3px 4px 3px 0; cursor: pointer; font-size: 12px;
+    }
+    button:hover { background: #3a76c8; }
+    button.off { background: #555; }
+
+    /* Bottom-left: interaction tests (buttons / input / scroll) */
+    #interact { left: 16px; bottom: 16px; width: 300px; }
+    #interact input[type=text] {
+        width: 100%; box-sizing: border-box; padding: 6px;
+        background: #0e1118; color: #fff; border: 1px solid #3a4a63; border-radius: 4px;
+    }
+    #scrollList { height: 90px; overflow-y: auto; background: #0e1118; border-radius: 4px; margin-top: 6px; }
+    #scrollList div { padding: 3px 8px; border-bottom: 1px solid #1c2433; }
+    #msgLog { font-family: Consolas, monospace; font-size: 11px; color: #ffd27e; min-height: 16px; word-break: break-all; }
+
+    /* Bottom-right: Canvas stress + pixel pass-through test */
+    #canvasPanel { right: 16px; bottom: 16px; width: 340px; }
+    #fx { background: transparent; border: 1px dashed #3a4a63; border-radius: 4px; display: block; }
+
+    /* Center: animated DOM sprites */
+    .sprite {
+        position: absolute;
+        width: 26px; height: 26px;
+        border-radius: 50%;
+        pointer-events: none;
+        will-change: transform;
+    }
+
+    /* Pass-through hint watermark: visible text-only marker indicating the center is the pass-through zone */
+    #passHint {
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+        color: rgba(126, 200, 255, 0.5);
+        font-size: 18px; text-align: center; pointer-events: none;
+    }
+</style>
+</head>
+<body>
+
+<div id="passHint">↖ The four corners are solid panels (intercept input)<br>The blank center is the transparent pass-through zone<br>(requires Widget background Alpha=0 + pass-through enabled)</div>
+
+<!-- Top-left: HUD -->
+<div class="panel" id="hud">
+    <h3>Live Stats</h3>
+    <div id="fpsBig">--</div>
+    <div class="row"><span>Frame time (avg)</span><span class="val" id="ft">--</span></div>
+    <div class="row"><span>Viewport resolution</span><span class="val" id="res">--</span></div>
+    <div class="row"><span>devicePixelRatio</span><span class="val" id="dpr">--</span></div>
+    <div class="row"><span>DOM sprites</span><span class="val" id="spriteCount">0</span></div>
+    <div class="row"><span>Canvas particles</span><span class="val" id="particleCount">0</span></div>
+    <div class="row"><span>Uptime</span><span class="val" id="uptime">0s</span></div>
+</div>
+
+<!-- Top-right: stress controls -->
+<div class="panel" id="controls">
+    <h3>Stress Controls</h3>
+    <div class="ctl">
+        <label><span>DOM sprites</span><span id="spriteVal">50</span></label>
+        <input type="range" id="spriteSlider" min="0" max="500" value="50">
+    </div>
+    <div class="ctl">
+        <label><span>Canvas particles</span><span id="particleVal">300</span></label>
+        <input type="range" id="particleSlider" min="0" max="5000" value="300" step="50">
+    </div>
+    <div class="ctl">
+        <label><span>JS main-thread load (ms/frame)</span><span id="busyVal">0</span></label>
+        <input type="range" id="busySlider" min="0" max="20" value="0">
+    </div>
+    <div>
+        <button id="btnToggleAnim">Pause all animation (static page test)</button>
+        <button id="btnBurst">Trigger a layout storm</button>
+    </div>
+</div>
+
+<!-- Bottom-left: interaction tests -->
+<div class="panel" id="interact">
+    <h3>Interaction / IME / Message Channel</h3>
+    <input type="text" id="imeInput" placeholder="Click and type with an IME to test candidate box positioning">
+    <div id="scrollList"></div>
+    <div style="margin-top:6px">
+        <button id="btnPost">postMessage to UE</button>
+        <button id="btnNav">In-page anchor jump</button>
+    </div>
+    <div>Message from UE:</div>
+    <div id="msgLog">(none)</div>
+</div>
+
+<!-- Bottom-right: Canvas -->
+<div class="panel" id="canvasPanel">
+    <h3>Canvas Stress (transparent background, tests pixel-level pass-through)</h3>
+    <canvas id="fx" width="316" height="170"></canvas>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    var startTime = performance.now();
+
+    // ---------- FPS stats ----------
+    var frameCount = 0;
+    var lastFpsTime = performance.now();
+    var lastFrameTime = performance.now();
+    var frameTimeAccum = 0;
+
+    function updateHud(now) {
+        frameCount++;
+        frameTimeAccum += now - lastFrameTime;
+        lastFrameTime = now;
+
+        if (now - lastFpsTime >= 1000) {
+            var fps = Math.round(frameCount * 1000 / (now - lastFpsTime));
+            document.getElementById('fpsBig').textContent = fps + ' FPS';
+            document.getElementById('fpsBig').style.color = fps >= 50 ? '#9aff9a' : (fps >= 30 ? '#ffd27e' : '#ff8a8a');
+            document.getElementById('ft').textContent = (frameTimeAccum / frameCount).toFixed(2) + ' ms';
+            frameCount = 0;
+            frameTimeAccum = 0;
+            lastFpsTime = now;
+            document.getElementById('uptime').textContent = Math.round((now - startTime) / 1000) + 's';
+        }
+    }
+
+    function refreshStaticStats() {
+        document.getElementById('res').textContent = window.innerWidth + ' x ' + window.innerHeight;
+        document.getElementById('dpr').textContent = window.devicePixelRatio.toFixed(2);
+    }
+    window.addEventListener('resize', refreshStaticStats);
+    refreshStaticStats();
+
+    // ---------- Animated DOM sprites ----------
+    var sprites = [];
+    var spriteColors = ['#7ec8ff', '#9aff9a', '#ffd27e', '#ff8a8a', '#d49aff'];
+
+    function setSpriteCount(count) {
+        while (sprites.length > count) {
+            var dead = sprites.pop();
+            dead.el.remove();
+        }
+        while (sprites.length < count) {
+            var el = document.createElement('div');
+            el.className = 'sprite';
+            el.style.background = spriteColors[sprites.length % spriteColors.length];
+            document.body.appendChild(el);
+            sprites.push({
+                el: el,
+                x: Math.random() * window.innerWidth,
+                y: Math.random() * window.innerHeight,
+                vx: (Math.random() - 0.5) * 4,
+                vy: (Math.random() - 0.5) * 4
+            });
+        }
+        document.getElementById('spriteCount').textContent = String(count);
+    }
+
+    function tickSprites() {
+        var w = window.innerWidth;
+        var h = window.innerHeight;
+        for (var i = 0; i < sprites.length; i++) {
+            var s = sprites[i];
+            s.x += s.vx;
+            s.y += s.vy;
+            if (s.x < 0 || s.x > w - 26) { s.vx = -s.vx; }
+            if (s.y < 0 || s.y > h - 26) { s.vy = -s.vy; }
+            s.el.style.transform = 'translate(' + s.x.toFixed(1) + 'px,' + s.y.toFixed(1) + 'px)';
+        }
+    }
+
+    // ---------- Canvas particles ----------
+    var canvas = document.getElementById('fx');
+    var ctx = canvas.getContext('2d');
+    var particles = [];
+
+    function setParticleCount(count) {
+        while (particles.length > count) {
+            particles.pop();
+        }
+        while (particles.length < count) {
+            particles.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height,
+                vx: (Math.random() - 0.5) * 2,
+                vy: (Math.random() - 0.5) * 2,
+                hue: Math.random() * 360
+            });
+        }
+        document.getElementById('particleCount').textContent = String(count);
+    }
+
+    function tickParticles() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        for (var i = 0; i < particles.length; i++) {
+            var p = particles[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            if (p.x < 0 || p.x > canvas.width) { p.vx = -p.vx; }
+            if (p.y < 0 || p.y > canvas.height) { p.vy = -p.vy; }
+            ctx.fillStyle = 'hsl(' + p.hue + ',80%,65%)';
+            ctx.fillRect(p.x, p.y, 3, 3);
+        }
+    }
+
+    // ---------- JS main-thread load ----------
+    var busyMsPerFrame = 0;
+    function burnCpu(ms) {
+        if (ms <= 0) { return; }
+        var until = performance.now() + ms;
+        while (performance.now() < until) { /* deliberate busy-wait */ }
+    }
+
+    // ---------- Main loop ----------
+    var animEnabled = true;
+    function mainLoop(now) {
+        if (animEnabled) {
+            tickSprites();
+            tickParticles();
+            burnCpu(busyMsPerFrame);
+        }
+        updateHud(now);
+        requestAnimationFrame(mainLoop);
+    }
+    requestAnimationFrame(mainLoop);
+
+    // ---------- Control wiring ----------
+    document.getElementById('spriteSlider').addEventListener('input', function () {
+        document.getElementById('spriteVal').textContent = this.value;
+        setSpriteCount(Number(this.value));
+    });
+    document.getElementById('particleSlider').addEventListener('input', function () {
+        document.getElementById('particleVal').textContent = this.value;
+        setParticleCount(Number(this.value));
+    });
+    document.getElementById('busySlider').addEventListener('input', function () {
+        document.getElementById('busyVal').textContent = this.value;
+        busyMsPerFrame = Number(this.value);
+    });
+
+    document.getElementById('btnToggleAnim').addEventListener('click', function () {
+        // Static page test: once paused the page produces no new frames, WGC should stop its
+        // callbacks, and a few seconds after hiding the Widget the browser process should be
+        // TrySuspend-ed (watch CPU drop to zero in Task Manager).
+        animEnabled = !animEnabled;
+        this.textContent = animEnabled ? 'Pause all animation (static page test)' : 'Resume animation';
+        this.classList.toggle('off', !animEnabled);
+    });
+
+    document.getElementById('btnBurst').addEventListener('click', function () {
+        // One-shot layout/style storm: creates a burst of pressure to see whether the UE-side frame rate is affected.
+        for (var i = 0; i < 200; i++) {
+            var el = document.createElement('div');
+            el.textContent = 'burst';
+            el.style.cssText = 'position:absolute;left:' + (Math.random() * 100) + '%;top:' +
+                (Math.random() * 100) + '%;color:rgba(255,255,255,0.4);pointer-events:none';
+            document.body.appendChild(el);
+            void el.offsetHeight; // force synchronous layout
+            setTimeout(el.remove.bind(el), 1500);
+        }
+    });
+
+    // ---------- Scroll list ----------
+    var list = document.getElementById('scrollList');
+    for (var i = 1; i <= 100; i++) {
+        var row = document.createElement('div');
+        row.textContent = 'Scroll test row ' + i + ' (wheel should be intercepted by the panel, not passed to the game)';
+        list.appendChild(row);
+    }
+
+    // ---------- UE message channel ----------
+    document.getElementById('btnPost').addEventListener('click', function () {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage({
+                type: 'perfTestPing',
+                time: Date.now(),
+                fps: document.getElementById('fpsBig').textContent
+            });
+            logMsg('Sent perfTestPing →');
+        } else {
+            logMsg('chrome.webview unavailable (not a WebView2 environment)');
+        }
+    });
+
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.addEventListener('message', function (event) {
+            logMsg('← ' + (typeof event.data === 'string' ? event.data : JSON.stringify(event.data)));
+        });
+    }
+
+    function logMsg(text) {
+        document.getElementById('msgLog').textContent = text;
+    }
+
+    document.getElementById('btnNav').addEventListener('click', function () {
+        location.hash = 'mark-' + Date.now();
+        logMsg('In-page jump: ' + location.hash);
+    });
+
+    // ---------- Initial state ----------
+    setSpriteCount(50);
+    setParticleCount(300);
+})();
+</script>
+</body>
+</html>

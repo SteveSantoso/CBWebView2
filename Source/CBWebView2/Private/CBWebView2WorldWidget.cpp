@@ -12,7 +12,7 @@
 UCBWebView2WorldWidget::UCBWebView2WorldWidget(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, InitialUrl(TEXT("https://www.bing.com"))
-	, BackgroundColor(FColor(255, 255, 255, 255))
+	, BackgroundColor(FColor(255, 255, 255, 0))
 	, bEnableTransparencyHitTest(false)
 	, RefreshRate(60.0f)
 	, CurrentUrl(InitialUrl)

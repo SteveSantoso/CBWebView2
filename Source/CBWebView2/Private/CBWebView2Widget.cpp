@@ -21,7 +21,7 @@ namespace
 UCBWebView2Widget::UCBWebView2Widget(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, InitialUrl(TEXT("https://www.bing.com"))
-	, BackgroundColor(FColor(255, 255, 255, 255))
+	, BackgroundColor(FColor(255, 255, 255, 0))
 	, bEnableTransparencyHitTest(false)
 	, bAllowNonInteractiveElementPassthrough(false)
 	, CurrentUrl(InitialUrl)

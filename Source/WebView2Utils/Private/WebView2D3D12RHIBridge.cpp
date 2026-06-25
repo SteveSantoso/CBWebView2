@@ -5,6 +5,8 @@
 // the include-guard race against the Windows SDK ones (see header comment).
 #include "ID3D12DynamicRHI.h"
 
+#include "Misc/EngineVersionComparison.h"
+
 namespace CBWebView2D3D12Bridge
 {
 	ID3D12Device* GetDevice()
@@ -30,7 +32,15 @@ namespace CBWebView2D3D12Bridge
 	{
 		if (IsRHID3D12() && Fence)
 		{
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
 			GetID3D12DynamicRHI()->RHIWaitManualFence(RHICmdList, Fence, Value);
+#else
+			// UE5.8 added a 4th parameter: a TSharedPtr<std::atomic<bool>> used to avoid
+			// submission-order deadlocks when the matching CPU-side signal hasn't happened yet.
+			// We wait on an externally-signalled fence, so there is no pending CPU signal to
+			// track; passing a null pointer skips that check and preserves the prior behavior.
+			GetID3D12DynamicRHI()->RHIWaitManualFence(RHICmdList, Fence, Value, nullptr);
+#endif
 		}
 	}
 }

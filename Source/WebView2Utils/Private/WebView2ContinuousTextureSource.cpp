@@ -60,6 +60,17 @@ namespace
 	constexpr int32 HiddenHostWindowMinimumSafetyPadding = 12000;
 	constexpr UINT HiddenHostWindowRefreshImeMessage = WM_APP + 0x201;
 
+	// If Windows Graphics Capture never delivers a frame within this window after StartCapture, treat the
+	// capture as effectively dead (unsupported Windows build, RDP/VM session, GPU driver bug, or a fully
+	// off-screen window with no live DWM composition surface) and clear the placeholder texture so the user
+	// sees a transparent widget plus an actionable log line instead of an uninitialized white quad.
+	constexpr double NoFrameWatchdogTimeoutSeconds = 5.0;
+
+	// How often the game thread retries starting the WGC capture pipeline when the previous attempt failed
+	// (e.g. CreateForWindow rejects the offscreen window, or the composition visual is not created yet). The
+	// retry prefers Visual capture as soon as the visual exists, so recovery is usually well under a second.
+	constexpr double CapturePipelineRetryIntervalSeconds = 0.5;
+
 	const TCHAR* LexToString(const ECBWebView2WorldOutputMode InMode)
 	{
 		switch (InMode)
@@ -350,6 +361,27 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 	bool bLoggedGpuFallback = false;
 	bool bLoggedOutputMode = false;
 	bool bLoggedGpuFrameReceived = false;
+	// First-frame watchdog state. bHasEverReceivedFrame is set from the WGC callback thread, so it is atomic;
+	// the rest are touched only on the game thread (InitializeCaptureResources / TickOutput / shutdown).
+	std::atomic<bool> bHasEverReceivedFrame{false};
+	double CaptureStartTime = -1.0;
+	bool bLoggedNoFrameTimeout = false;
+	bool bClearedPlaceholderOnTimeout = false;
+
+	// Where WGC pulls pixels from. Window capture (CreateForWindow) is the default because the host window
+	// exists synchronously; Visual capture (GraphicsCaptureItem::CreateFromVisual) is the more robust target
+	// on machines where DWM keeps no composition surface for a fully-offscreen window. The watchdog auto-switches
+	// from Window to Visual if no frame arrives, so no developer-facing setting is needed.
+	enum class ECaptureSource : uint8 { Window, Visual };
+	ECaptureSource ActiveCaptureSource = ECaptureSource::Window;
+	bool bAttemptedVisualSource = false;
+	// Deferred capture-pipeline start. The capture device can be ready while no pipeline is running yet, because
+	// Window capture can be rejected on some machines and the composition Visual is created asynchronously. The
+	// game thread retries (preferring Visual) until one source starts; only then does the first-frame watchdog arm.
+	bool bCapturePipelineActive = false;
+	double CaptureDeviceReadyTime = -1.0;
+	double LastPipelineStartAttemptTime = -1.0;
+	bool bLoggedCaptureStartFailure = false;
 	FVector2D LastInputScreenSpacePosition = FVector2D::ZeroVector;
 	FVector2D LastInputLocalPoint = FVector2D::ZeroVector;
 	FVector2D LastImeCaretLocalPoint = FVector2D::ZeroVector;
@@ -980,15 +1012,39 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 		return SUCCEEDED(Result) && CaptureDevice.get() != nullptr && CaptureContext.get() != nullptr;
 	}
 
+	/** Whether Windows Graphics Capture is available on this OS at all. Older Windows 10 builds, some Server SKUs, and sessions without DWM (certain RDP/VM configurations) report false. */
+	static bool IsGraphicsCaptureSupported()
+	{
+		// IsSupported() can throw on systems where the WinRT type is absent; treat any failure as unsupported.
+		try
+		{
+			return winrt::Windows::Graphics::Capture::GraphicsCaptureSession::IsSupported();
+		}
+		catch (...)
+		{
+			return false;
+		}
+	}
+
 	bool InitializeCaptureResources()
 	{
 		if (!HiddenWindow)
 		{
+			UE_LOG(LogWebView2Utils, Error, TEXT("CBWebView2 world capture init failed: the offscreen host window is missing."));
+			return false;
+		}
+
+		if (!IsGraphicsCaptureSupported())
+		{
+			UE_LOG(LogWebView2Utils, Error,
+				TEXT("CBWebView2 world capture is unavailable: Windows Graphics Capture is not supported on this machine. ")
+				TEXT("This typically means an old Windows 10 build (needs 1903+), a session without DWM (some Remote Desktop / VM configs), or a disabled/blocked screen-capture policy. The world widget will show a transparent (blank) texture."));
 			return false;
 		}
 
 		if (!PrepareOutputMode() || !InitializeD3D11CaptureDevice())
 		{
+			UE_LOG(LogWebView2Utils, Error, TEXT("CBWebView2 world capture init failed: could not prepare the output mode or create the capture D3D11 device (check the GPU driver / adapter)."));
 			return false;
 		}
 
@@ -996,6 +1052,7 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 		CaptureDevice.as(DxgiDevice);
 		if (DxgiDevice.get() == nullptr)
 		{
+			UE_LOG(LogWebView2Utils, Error, TEXT("CBWebView2 world capture init failed: the capture D3D11 device does not expose IDXGIDevice."));
 			return false;
 		}
 
@@ -1003,13 +1060,58 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 		HRESULT Result = CreateDirect3D11DeviceFromDXGIDevice(DxgiDevice.get(), InspectableDevice.put());
 		if (FAILED(Result) || InspectableDevice.get() == nullptr)
 		{
+			UE_LOG(LogWebView2Utils, Error, TEXT("CBWebView2 world capture init failed: CreateDirect3D11DeviceFromDXGIDevice returned 0x%08X."), static_cast<uint32>(Result));
 			return false;
 		}
 
 		WinRTDevice = InspectableDevice.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
 		if (!WinRTDevice)
 		{
+			UE_LOG(LogWebView2Utils, Error, TEXT("CBWebView2 world capture init failed: could not obtain the IDirect3DDevice WinRT projection."));
 			return false;
+		}
+
+		bLoggedNoFrameTimeout = false;
+		bClearedPlaceholderOnTimeout = false;
+		bAttemptedVisualSource = false;
+		bLoggedCaptureStartFailure = false;
+		CaptureDeviceReadyTime = FPlatformTime::Seconds();
+		LastPipelineStartAttemptTime = -1.0;
+
+		// Try Window capture first: its host window exists synchronously, so machines where it already works are
+		// unaffected. But do NOT fail initialization if it cannot start — on some machines CreateForWindow rejects
+		// the offscreen window outright (observed: "could not create the capture item for source=Window"). The
+		// capture device is ready regardless; TickEnsureCapturePipeline() retries on the game thread and switches to
+		// Visual capture (CreateFromVisual) as soon as the composition visual exists, which is created asynchronously.
+		StartCapturePipeline(ECaptureSource::Window);
+		return true;
+	}
+
+	/** Build the WGC capture item from the requested source. CaptureItem is left null on failure. */
+	bool CreateCaptureItemForSource(ECaptureSource Source)
+	{
+		CaptureItem = nullptr;
+
+		if (Source == ECaptureSource::Visual)
+		{
+			const TSharedPtr<FWebView2Window> Window = WebViewWindowWeak.Pin();
+			if (!Window.IsValid() || !Window->WebViewVisual)
+			{
+				// The WebView2 composition visual is created asynchronously; it may simply not exist yet.
+				return false;
+			}
+
+			// GraphicsCaptureItem::CreateFromVisual captures the live WinRT composition subtree directly, so it does
+			// not depend on the offscreen host window having a DWM composition surface (the usual cause of blank frames).
+			try
+			{
+				CaptureItem = winrt::Windows::Graphics::Capture::GraphicsCaptureItem::CreateFromVisual(Window->WebViewVisual);
+			}
+			catch (...)
+			{
+				CaptureItem = nullptr;
+			}
+			return CaptureItem != nullptr;
 		}
 
 		auto CaptureItemInterop = winrt::get_activation_factory<winrt::Windows::Graphics::Capture::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
@@ -1018,12 +1120,57 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 			return false;
 		}
 
-		Result = CaptureItemInterop->CreateForWindow(
+		const HRESULT Result = CaptureItemInterop->CreateForWindow(
 			HiddenWindow,
 			winrt::guid_of<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem>(),
 			reinterpret_cast<void**>(winrt::put_abi(CaptureItem)));
-		if (FAILED(Result) || !CaptureItem)
+		return SUCCEEDED(Result) && CaptureItem != nullptr;
+	}
+
+	/**
+	 * (Re)build the frame pool + session against the requested capture source and start capture, reusing the
+	 * already-created capture device. Tears down any previous pool/session first. Re-arms the first-frame watchdog.
+	 */
+	bool StartCapturePipeline(ECaptureSource Source)
+	{
+		if (!WinRTDevice)
 		{
+			UE_LOG(LogWebView2Utils, Error, TEXT("CBWebView2 world capture init failed: the WinRT capture device is not available."));
+			return false;
+		}
+
+		// Drop any existing pipeline (keep the capture device) before rebuilding. Unsubscribe first so no new
+		// OnFrameArrived starts, then take both locks (readback before resource, matching ShutdownCaptureResources)
+		// to wait out any in-flight CPU readback before releasing the pool/session.
+		if (FramePool)
+		{
+			FramePool.FrameArrived(FrameArrivedToken);
+		}
+		{
+			FScopeLock ReadbackScopeLock(&CaptureReadbackCriticalSection);
+			FScopeLock ScopeLock(&CaptureResourceCriticalSection);
+			CaptureSession = nullptr;
+			FramePool = nullptr;
+			CaptureItem = nullptr;
+		}
+		bCapturePipelineActive = false;
+
+		// Log a start failure at most once until the next successful start, so the game-thread retry loop
+		// (TickEnsureCapturePipeline, every CapturePipelineRetryIntervalSeconds) does not spam the log.
+		const auto LogStartFailureOnce = [this](const TCHAR* Reason)
+		{
+			if (!bLoggedCaptureStartFailure)
+			{
+				UE_LOG(LogWebView2Utils, Warning, TEXT("CBWebView2 world capture pipeline start failed (will retry): %s"), Reason);
+				bLoggedCaptureStartFailure = true;
+			}
+		};
+
+		if (!CreateCaptureItemForSource(Source))
+		{
+			LogStartFailureOnce(Source == ECaptureSource::Visual
+				? TEXT("could not create the capture item for source=Visual (the composition visual may not be ready yet)")
+				: TEXT("could not create the capture item for source=Window"));
 			return false;
 		}
 
@@ -1031,9 +1178,10 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 			WinRTDevice,
 			winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
 			2,
-			CaptureItem.Size());
+			{WindowSize.X, WindowSize.Y});
 		if (!FramePool)
 		{
+			LogStartFailureOnce(TEXT("Direct3D11CaptureFramePool::CreateFreeThreaded returned null"));
 			return false;
 		}
 
@@ -1041,13 +1189,109 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 		CaptureSession = FramePool.CreateCaptureSession(CaptureItem);
 		if (!CaptureSession)
 		{
+			LogStartFailureOnce(TEXT("CreateCaptureSession returned null"));
 			FramePool.FrameArrived(FrameArrivedToken);
 			FramePool = nullptr;
 			return false;
 		}
 
 		ApplyCaptureSessionQualityOptions();
+		// Force MinUpdateInterval to be re-pushed onto the new session on the next tick.
+		AppliedMinUpdateIntervalFps = -1.0f;
 		CaptureSession.StartCapture();
+
+		ActiveCaptureSource = Source;
+		bCapturePipelineActive = true;
+		bLoggedCaptureStartFailure = false;
+		UE_LOG(LogWebView2Utils, Log, TEXT("CBWebView2 world capture started: source=%s size=%dx%d."),
+			Source == ECaptureSource::Visual ? TEXT("Visual") : TEXT("Window"), WindowSize.X, WindowSize.Y);
+
+		// Arm the first-frame watchdog (see NoFrameWatchdogTimeoutSeconds) for this source.
+		bHasEverReceivedFrame = false;
+		bLoggedGpuFrameReceived = false;
+		CaptureStartTime = FPlatformTime::Seconds();
+		return true;
+	}
+
+	/**
+	 * Game-thread retry for the capture pipeline. Runs while no pipeline is active (Window capture was rejected,
+	 * or the composition visual was not ready at init). Throttled by CapturePipelineRetryIntervalSeconds; prefers
+	 * Visual capture (CreateFromVisual) the moment the visual exists, since it does not need the offscreen window
+	 * to be capturable. If nothing can start for NoFrameWatchdogTimeoutSeconds, clears the placeholder to
+	 * transparent so the widget never sits on an uninitialized white texture. Returns true on the clearing tick.
+	 */
+	bool TickEnsureCapturePipeline(UTexture2D*& OutUpdatedTexture)
+	{
+		if (bCapturePipelineActive)
+		{
+			return false;
+		}
+
+		const double Now = FPlatformTime::Seconds();
+		if (LastPipelineStartAttemptTime < 0.0 || Now - LastPipelineStartAttemptTime >= CapturePipelineRetryIntervalSeconds)
+		{
+			LastPipelineStartAttemptTime = Now;
+
+			const TSharedPtr<FWebView2Window> Window = WebViewWindowWeak.Pin();
+			const bool bVisualReady = Window.IsValid() && Window->WebViewVisual != nullptr;
+			if (bVisualReady && StartCapturePipeline(ECaptureSource::Visual))
+			{
+				bAttemptedVisualSource = true;
+				return false;
+			}
+			if (StartCapturePipeline(ECaptureSource::Window))
+			{
+				return false;
+			}
+		}
+
+		// Could not start any pipeline yet. Once the grace period elapses, fall back to a transparent clear (once).
+		if (!bClearedPlaceholderOnTimeout && CaptureDeviceReadyTime >= 0.0 &&
+			Now - CaptureDeviceReadyTime >= NoFrameWatchdogTimeoutSeconds)
+		{
+			if (!bLoggedNoFrameTimeout)
+			{
+				UE_LOG(LogWebView2Utils, Warning,
+					TEXT("CBWebView2 world could not start any capture pipeline within %.0fs (window capture rejected and the composition visual never became capturable). ")
+					TEXT("Check the Windows build, GPU driver, and that this is not a Remote Desktop / headless session. Clearing the widget to transparent."),
+					NoFrameWatchdogTimeoutSeconds);
+				bLoggedNoFrameTimeout = true;
+			}
+			return ClearPlaceholderToTransparent(OutUpdatedTexture);
+		}
+
+		return false;
+	}
+
+	/** Upload a fully transparent frame so a failed capture reads as blank instead of an uninitialized white quad. Returns true if a texture was produced. */
+	bool ClearPlaceholderToTransparent(UTexture2D*& OutUpdatedTexture)
+	{
+		FIntPoint ClearSize = FIntPoint::ZeroValue;
+		if (UTexture2D* Existing = PresentedTexture.Get())
+		{
+			ClearSize = FIntPoint(Existing->GetSizeX(), Existing->GetSizeY());
+		}
+		if (ClearSize.X <= 0 || ClearSize.Y <= 0)
+		{
+			ClearSize = WindowSize;
+		}
+		if (ClearSize.X <= 0 || ClearSize.Y <= 0)
+		{
+			return false;
+		}
+
+		UTexture2D* Texture = PresentedTexture.Get();
+		if (!EnsureTextureMatches(Texture, ClearSize))
+		{
+			return false;
+		}
+		PresentedTexture.Reset(Texture);
+
+		TArray<uint8> TransparentBytes;
+		TransparentBytes.SetNumZeroed(ClearSize.X * ClearSize.Y * 4);
+		UploadTextureData(Texture, MoveTemp(TransparentBytes), ClearSize);
+		bClearedPlaceholderOnTimeout = true;
+		OutUpdatedTexture = Texture;
 		return true;
 	}
 
@@ -1162,6 +1406,16 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 			::CloseHandle(PendingSharedTextureHandle);
 			PendingSharedTextureHandle = nullptr;
 		}
+
+		// Disarm the first-frame watchdog so it cannot fire against a torn-down or not-yet-restarted capture.
+		CaptureStartTime = -1.0;
+		bHasEverReceivedFrame = false;
+		ActiveCaptureSource = ECaptureSource::Window;
+		bAttemptedVisualSource = false;
+		bCapturePipelineActive = false;
+		CaptureDeviceReadyTime = -1.0;
+		LastPipelineStartAttemptTime = -1.0;
+		bLoggedCaptureStartFailure = false;
 	}
 
 	/**
@@ -1282,6 +1536,9 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 		FrameTexture->GetDesc(&FrameDesc);
 		const int32 Width = static_cast<int32>(FrameDesc.Width);
 		const int32 Height = static_cast<int32>(FrameDesc.Height);
+
+		// Disarm the first-frame watchdog: WGC is delivering frames regardless of which output mode consumes them.
+		bHasEverReceivedFrame = true;
 
 		if (ActiveOutputMode == ECBWebView2WorldOutputMode::D3D11GpuCopy)
 		{
@@ -1807,11 +2064,71 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 		return true;
 	}
 
+	/**
+	 * First-frame watchdog. If Windows Graphics Capture never delivers a frame, every output mode would otherwise
+	 * leave the freshly created (uninitialized, typically white) placeholder texture on screen forever. Once the
+	 * timeout elapses, log one actionable warning and clear the texture to transparent so the failure is obvious
+	 * and non-misleading. Returns true (with OutUpdatedTexture set) on the single tick that performs the clear.
+	 */
+	bool TickFirstFrameWatchdog(UTexture2D*& OutUpdatedTexture)
+	{
+		if (bHasEverReceivedFrame.load() || bClearedPlaceholderOnTimeout || CaptureStartTime < 0.0)
+		{
+			return false;
+		}
+
+		if (FPlatformTime::Seconds() - CaptureStartTime < NoFrameWatchdogTimeoutSeconds)
+		{
+			return false;
+		}
+
+		// Auto-recovery: if the window-capture target produced nothing, switch once to visual capture, which does not
+		// depend on the offscreen window having a live DWM composition surface. This is fully automatic — no setting.
+		if (ActiveCaptureSource == ECaptureSource::Window && !bAttemptedVisualSource)
+		{
+			bAttemptedVisualSource = true;
+			UE_LOG(LogWebView2Utils, Warning,
+				TEXT("CBWebView2 world received no frame within %.0fs from window capture; switching to visual capture (CreateFromVisual)."),
+				NoFrameWatchdogTimeoutSeconds);
+			if (StartCapturePipeline(ECaptureSource::Visual))
+			{
+				// New source armed with a fresh watchdog window; give it a chance before deciding anything else.
+				return false;
+			}
+			UE_LOG(LogWebView2Utils, Warning, TEXT("CBWebView2 world could not switch to visual capture (the composition visual may not be ready)."));
+		}
+
+		if (!bLoggedNoFrameTimeout)
+		{
+			UE_LOG(LogWebView2Utils, Warning,
+				TEXT("CBWebView2 world received no captured frame within %.0fs (mode=%s, source=%s). Windows Graphics Capture may be producing blank frames on this machine: ")
+				TEXT("check the Windows build, GPU driver, that this is not a Remote Desktop / headless session, and that the Microsoft Edge WebView2 Runtime is installed and up to date. Clearing the widget to transparent."),
+				NoFrameWatchdogTimeoutSeconds,
+				LexToString(ActiveOutputMode),
+				ActiveCaptureSource == ECaptureSource::Visual ? TEXT("Visual") : TEXT("Window"));
+			bLoggedNoFrameTimeout = true;
+		}
+
+		// Replace the uninitialized placeholder with a fully transparent frame so the widget reads as blank, not white.
+		return ClearPlaceholderToTransparent(OutUpdatedTexture);
+	}
+
 	bool TickOutput(double InCurrentTime, float InMaxFramesPerSecond, UTexture2D*& OutUpdatedTexture)
 	{
 		OutUpdatedTexture = nullptr;
 
+		// Keep trying to start the capture pipeline (preferring Visual) until one source works.
+		if (TickEnsureCapturePipeline(OutUpdatedTexture))
+		{
+			return true;
+		}
+
 		ApplyMinUpdateInterval(InMaxFramesPerSecond);
+
+		if (TickFirstFrameWatchdog(OutUpdatedTexture))
+		{
+			return true;
+		}
 
 		if (ActiveOutputMode == ECBWebView2WorldOutputMode::D3D11GpuCopy)
 		{
