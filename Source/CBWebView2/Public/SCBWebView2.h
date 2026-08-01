@@ -131,6 +131,8 @@ private:
 	FText GetAddressBarUrlText() const;
 	EVisibility GetLoadingIndicatorVisibility() const;
 	FVector2D GetLocalWebViewPoint(const FGeometry& MyGeometry, const FVector2D& ScreenSpacePosition) const;
+	bool ShouldForwardKeyboardInput() const;
+	void AcquireWebViewInputFocus(EFocusCause FocusCause);
 	void ReleaseWebViewInputFocus();
 	FReply ExecuteMouseButtonDoubleClickEvent(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
 	void HandleNativeMouseButtonDoubleClick(const FVector2D& LocalPosition, const FVector2D& ScreenSpacePosition, EWebView2MouseButton Button);

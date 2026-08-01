@@ -167,6 +167,21 @@
 		postImeCaretRect(element || document.activeElement);
 	}
 
+	var editableFocusRefreshPending = false;
+	function scheduleEditableFocusRefresh() {
+		if (editableFocusRefreshPending) {
+			return;
+		}
+
+		editableFocusRefreshPending = true;
+		window.setTimeout(function() {
+			editableFocusRefreshPending = false;
+			// Run after the browser's default pointer handling. This reports both sides of the transition:
+			// inputs acquire keyboard ownership, while buttons/canvas/background return it to Unreal.
+			postEditableFocusState(document.activeElement);
+		}, 0);
+	}
+
 	function forceTransparencyRefresh(event, defer) {
 		if (!event || !window.__cbwebview2TransparencyCheck || typeof window.__cbwebview2TransparencyCheck.forceCheck !== 'function') {
 			return;
@@ -193,8 +208,51 @@
 	function handlePointerState(event, defer) {
 		rememberMouseTarget(event);
 		forceTransparencyRefresh(event, defer);
+		if (defer) {
+			scheduleEditableFocusRefresh();
+		}
 	}
 	
+
+	// Drag-and-drop suppression.
+	//
+	// In visual-hosting mode the host implements no drag-and-drop bridge (no IDropTarget, no
+	// ICoreWebView2CompositionController3 DragEnter/Over/Leave/Drop). Letting the page start a native drag
+	// leaves the browser waiting on a drag loop that never runs: the page hangs, and because the host is
+	// blocked mid mouse-message dispatch with the pointer still captured, it takes the engine down with it.
+	// Cancelling the drag at the source is what keeps that from ever being reached.
+	if (!window.__cbwebview2AllowPageDragAndDrop) {
+		var cancelDragEvent = function(event) {
+			event.preventDefault();
+			event.stopPropagation();
+		};
+
+		// Cancelling dragstart is the fix: with no drag source there is no drag, so no dragover or drop
+		// follows either. drop is kept only as a backstop against the browser's default handling.
+		//
+		// Deliberately NOT hooking dragover: in the HTML5 drag-and-drop model, calling preventDefault on
+		// dragover means "this element accepts the drop", so cancelling it there would opt the page IN as a
+		// drop target - the exact opposite of the intent. Leaving dragover alone keeps the default reject.
+		document.addEventListener('dragstart', cancelDragEvent, true);
+		document.addEventListener('drop', cancelDragEvent, true);
+
+		// Belt-and-braces for elements that are draggable by default (images, links). This script runs at
+		// document-start, so document.head may not exist yet - documentElement always does.
+		var installNoDragStyle = function() {
+			var root = document.head || document.documentElement;
+			if (!root || document.getElementById('__cbwebview2NoDragStyle')) {
+				return;
+			}
+
+			var style = document.createElement('style');
+			style.id = '__cbwebview2NoDragStyle';
+			style.textContent = 'img, a { -webkit-user-drag: none !important; user-drag: none !important; }';
+			root.appendChild(style);
+		};
+
+		installNoDragStyle();
+		document.addEventListener('DOMContentLoaded', installNoDragStyle, true);
+	}
 
 	document.addEventListener('mousedown', function(event) {
 		handlePointerState(event, false);
@@ -242,14 +300,10 @@
 	}, true);
 
 	document.addEventListener('focusout', function() {
-		window.setTimeout(function() {
-			postEditableFocusState(document.activeElement);
-		}, 0);
+		scheduleEditableFocusRefresh();
 	}, true);
 
-	window.setTimeout(function() {
-		postEditableFocusState(document.activeElement);
-	}, 0);
+	scheduleEditableFocusRefresh();
 
 	window.__cbwebview2DispatchDblClickFallback = function(clientX, clientY, button, screenX, screenY, ctrlKey, shiftKey, altKey, metaKey) {
 		var requestCount = state.dblclickCount;

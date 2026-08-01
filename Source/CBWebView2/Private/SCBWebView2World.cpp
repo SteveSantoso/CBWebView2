@@ -1,8 +1,10 @@
 // Copyright 2026-Present SteveSantoso. All Rights Reserved.
 #include "SCBWebView2World.h"
 
+#include "CBWebView2KeyboardRouter.h"
 #include "CBWebView2.h"
 #include "WebView2InternalMessage.h"
+#include "WebView2NativeFocus.h"
 #include "WebView2Settings.h"
 #include "WebView2Subsystem.h"
 
@@ -249,7 +251,8 @@ FVector2D SCBWebView2World::ComputeDesiredSize(float LayoutScaleMultiplier) cons
 {
 	if (BrowserPixelSize.X > 0 && BrowserPixelSize.Y > 0)
 	{
-		return FVector2D(BrowserPixelSize);
+		// BrowserPixelSize is the physical texture resolution; Slate expects logical units here.
+		return FVector2D(BrowserPixelSize) / FMath::Max(CurrentSlateScale, UE_SMALL_NUMBER);
 	}
 
 	return InitialDrawSize;
@@ -509,6 +512,12 @@ bool SCBWebView2World::SupportsKeyboardFocus() const
 
 FReply SCBWebView2World::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
 {
+	if (CBWebView2KeyboardRouting::IsKeyReservedForUnreal(InKeyEvent.GetKey()))
+	{
+		ReleaseWebViewInputFocus();
+		return FReply::Unhandled();
+	}
+
 	if (!ShouldForwardKeyboardInput())
 	{
 		return FReply::Unhandled();
@@ -548,6 +557,12 @@ FReply SCBWebView2World::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent&
 
 FReply SCBWebView2World::OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
 {
+	if (CBWebView2KeyboardRouting::IsKeyReservedForUnreal(InKeyEvent.GetKey()))
+	{
+		ReleaseWebViewInputFocus();
+		return FReply::Unhandled();
+	}
+
 	if (!ShouldForwardKeyboardInput())
 	{
 		return FReply::Unhandled();
@@ -755,18 +770,16 @@ void SCBWebView2World::HandleMessageFromWeb(const FString& Message)
 	bool bNewEditableFocusState = false;
 	if (FCBWebView2InternalMessageParser::TryReadLegacyBoolMessage(RoutedMessage, *EditableFocusPrefix, bNewEditableFocusState))
 	{
-		if (bIsEditableElementFocused != bNewEditableFocusState)
+		// Always reconcile native focus. Chromium can retain an HWND after a normal non-editable click even
+		// when the last DOM state was already false.
+		bIsEditableElementFocused = bNewEditableFocusState;
+		if (ShouldForwardKeyboardInput())
 		{
-			bIsEditableElementFocused = bNewEditableFocusState;
-
-			if (bNewEditableFocusState)
-			{
-				AcquireWebViewInputFocus(EFocusCause::Mouse);
-			}
-			else
-			{
-				ReleaseWebViewInputFocus();
-			}
+			AcquireWebViewInputFocus(EFocusCause::Mouse);
+		}
+		else
+		{
+			ReleaseWebViewInputFocus();
 		}
 	}
 
@@ -808,12 +821,10 @@ void SCBWebView2World::HandleMessageFromWeb(const FString& Message)
 
 bool SCBWebView2World::ShouldForwardKeyboardInput() const
 {
-	if (bEnableTransparencyHitTest)
-	{
-		return bIsHoveringInteractiveContent || bIsEditableElementFocused;
-	}
-
-	return bIsEditableElementFocused;
+	return CBWebView2KeyboardRouting::ShouldRouteKeysToBrowser(
+		CBWebView2KeyboardRouting::GetDefaultCaptureMode(),
+		bIsEditableElementFocused,
+		bIsHoveringInteractiveContent);
 }
 
 bool SCBWebView2World::ShouldBlockInputForTransparentHitTest(bool bAllowCapturedInput) const
@@ -843,7 +854,6 @@ void SCBWebView2World::ReleaseWebViewInputFocusForTransparentPassthrough(bool bA
 		return;
 	}
 
-	bIsEditableElementFocused = false;
 	ReleaseWebViewInputFocus();
 }
 
@@ -993,7 +1003,10 @@ void SCBWebView2World::UpdateBrowserBounds(const FGeometry& AllottedGeometry)
 		return;
 	}
 
-	FVector2D DesiredPixelSize = AllottedGeometry.GetLocalSize() * AllottedGeometry.Scale;
+	CurrentSlateScale = FMath::Max(AllottedGeometry.Scale, UE_SMALL_NUMBER);
+	WebViewWindow->SetRasterizationScale(CurrentSlateScale);
+
+	FVector2D DesiredPixelSize = AllottedGeometry.GetLocalSize() * CurrentSlateScale;
 	if (DesiredPixelSize.X <= 0.0f || DesiredPixelSize.Y <= 0.0f)
 	{
 		DesiredPixelSize = InitialDrawSize;
@@ -1187,7 +1200,8 @@ void SCBWebView2World::ReleaseWebViewInputFocus()
 	}
 	TGuardValue<bool> ReentryGuard(bIsReleasingFocus, true);
 
-	bIsMouseButtonHeld = false;
+	const bool bHadEditableFocus = bIsEditableElementFocused;
+	bIsEditableElementFocused = false;
 	UpdateTransparentHitTestVisibility();
 	if (ContinuousTextureSource.IsValid())
 	{
@@ -1197,6 +1211,12 @@ void SCBWebView2World::ReleaseWebViewInputFocus()
 
 	if (WebViewWindow.IsValid())
 	{
+		if (bHadEditableFocus)
+		{
+			WebViewWindow->ExecuteScript(
+				TEXT("if(document.activeElement && document.activeElement.blur){document.activeElement.blur();}"),
+				nullptr);
+		}
 		WebViewWindow->MoveFocus(false);
 	}
 
@@ -1211,11 +1231,6 @@ void SCBWebView2World::ReleaseWebViewInputFocus()
 	}
 
 	FSlateApplication& SlateApplication = FSlateApplication::Get();
-	if (HasMouseCapture())
-	{
-		SlateApplication.ReleaseAllPointerCapture();
-	}
-
 	const TSharedPtr<SWidget> FocusedWidget = SlateApplication.GetKeyboardFocusedWidget();
 	if (FocusedWidget.Get() == this)
 	{
@@ -1247,31 +1262,7 @@ void SCBWebView2World::ReleaseWebViewInputFocus()
 		return;
 	}
 
-	// With the dual-HWND split, the WebView2 controller is parented to the UE main HWND, so IsChild() alone cannot distinguish
-	// between WebView2's own child HWNDs (Chrome_*) and other legitimate Slate-owned children. Walk up the parent chain
-	// looking for any window whose class name indicates it belongs to WebView2's Chromium host.
-	auto IsWebView2OwnedFocus = [](HWND InFocus, HWND InHost) -> bool
-	{
-		HWND Walk = InFocus;
-		WIDECHAR ClassName[64];
-		while (Walk && Walk != InHost)
-		{
-			const int32 Length = ::GetClassNameW(Walk, ClassName, UE_ARRAY_COUNT(ClassName));
-			if (Length > 0)
-			{
-				const FString ClassStr(Length, ClassName);
-				// WebView2 child HWND classes all start with "Chrome_" (e.g. Chrome_WidgetWin_1, Chrome_RenderWidgetHostHWND).
-				if (ClassStr.StartsWith(TEXT("Chrome_")) || ClassStr.StartsWith(TEXT("Intermediate D3D Window")))
-				{
-					return true;
-				}
-			}
-			Walk = ::GetParent(Walk);
-		}
-		return false;
-	};
-
-	if (!IsWebView2OwnedFocus(CurrentFocus, HostHwnd))
+	if (!CBWebView2NativeFocus::IsWebView2OwnedWindow(CurrentFocus, HostHwnd))
 	{
 		// Focus is on a non-WebView2 part of the host subtree (e.g. the Slate viewport itself). Leave it alone.
 		return;
@@ -1309,6 +1300,12 @@ bool SCBWebView2World::InitializeTextureSource(void* FocusParentWindowHandle)
 	}
 
 	WebViewWindow = ContinuousTextureSource->GetWebViewWindow();
+	if (WebViewWindow.IsValid())
+	{
+		// WidgetComponent renders at scale 1 by default. Apply that immediately so the hidden host
+		// window's monitor DPI cannot affect the first browser frame before Slate geometry is available.
+		WebViewWindow->SetRasterizationScale(1.0);
+	}
 	BindWebViewEvents();
 
 	if (UTexture2D* InitialTexture = ContinuousTextureSource->GetTexture())

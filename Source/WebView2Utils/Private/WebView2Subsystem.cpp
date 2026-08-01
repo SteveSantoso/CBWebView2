@@ -3,6 +3,7 @@
 
 #include "WebView2Log.h"
 #include "WebView2Manager.h"
+#include "WebView2NativeFocus.h"
 
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
@@ -107,12 +108,12 @@ void UWebView2Subsystem::Tick(float DeltaTime)
 			{
 				HWND NativeWindow = static_cast<HWND>(NativeHandle);
 				const HWND CurrentFocus = ::GetFocus();
-				// If focus is already inside the host HWND subtree, including WebView2 IME child windows,
-				// do not steal it back every frame or IME composition windows can be dismissed.
-				// Cases where UE should reclaim WASD are already handled proactively by SCBWebView2
-				// through MoveFocus(false) + ClearKeyboardFocus in transparent regions.
+				const bool bWebViewOwnsFocus =
+					CBWebView2NativeFocus::IsWebView2OwnedWindow(CurrentFocus, NativeWindow);
+				// Preserve unrelated native children, but reclaim Chromium even though it is also parented
+				// under the Unreal HWND. IsChild() alone was the reason keyboard focus could remain trapped.
 				if (::GetForegroundWindow() == NativeWindow && CurrentFocus != NativeWindow &&
-					(CurrentFocus == nullptr || !::IsChild(NativeWindow, CurrentFocus)))
+					(bWebViewOwnsFocus || CurrentFocus == nullptr || !::IsChild(NativeWindow, CurrentFocus)))
 				{
 					::SetFocus(NativeWindow);
 				}

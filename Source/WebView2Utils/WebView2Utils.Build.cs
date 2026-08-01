@@ -22,6 +22,7 @@ public class WebView2Utils : ModuleRules
 			new[]
 			{
 				"Core",
+				"InputCore",
 				"UMG",
 				"WebView2",
 				"DeveloperSettings"
@@ -35,7 +36,6 @@ public class WebView2Utils : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
-				"InputCore",
 				"ApplicationCore",
 				"Projects",
 				"Json",

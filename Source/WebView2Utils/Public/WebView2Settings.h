@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
+#include "InputCoreTypes.h"
 #include "WebView2Settings.generated.h"
 
 struct FPropertyChangedEvent;
@@ -24,6 +25,23 @@ enum class ECBWebView2PermissionPolicy : uint8
 	Default UMETA(DisplayName = "Use WebView2 Default"),
 	Allow UMETA(DisplayName = "Allow by Default"),
 	Deny UMETA(DisplayName = "Deny by Default")
+};
+
+/** Policy controlling when a WebView is allowed to own keyboard input. */
+UENUM(BlueprintType)
+enum class ECBWebView2KeyboardCaptureMode : uint8
+{
+	/** Never route keyboard input to the page. Mouse interaction remains available. */
+	Never UMETA(DisplayName = "Never"),
+
+	/** Route keys only while an input, textarea, or contenteditable element owns DOM focus. */
+	TextInputOnly UMETA(DisplayName = "Text Input Only"),
+
+	/** Route keys while editable content is focused or the pointer is over interactive page content. */
+	Interactive UMETA(DisplayName = "Interactive Content"),
+
+	/** Route keys whenever the WebView owns focus. */
+	Always UMETA(DisplayName = "Always")
 };
 
 /**
@@ -222,6 +240,24 @@ struct WEBVIEW2UTILS_API FCBWebView2PerformanceSettings
 	bool bReduceMemoryWhenHidden = true;
 };
 
+/** Keyboard ownership settings shared by screen-space and world-space WebViews. */
+USTRUCT(BlueprintType)
+struct WEBVIEW2UTILS_API FCBWebView2InputSettings
+{
+	GENERATED_BODY()
+
+	/**
+	 * When the browser may consume keyboard input.
+	 * Text Input Only keeps gameplay and editor shortcuts in Unreal until a page text field is actually focused.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
+	ECBWebView2KeyboardCaptureMode KeyboardCaptureMode = ECBWebView2KeyboardCaptureMode::TextInputOnly;
+
+	/** Keys that are always returned to Unreal even while the browser is accepting text input. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
+	TArray<FKey> KeysAlwaysRoutedToUnreal = {EKeys::Escape};
+};
+
 /**
  * World-space output defaults.
  *
@@ -285,6 +321,10 @@ public:
 	/** Performance and power-saving settings. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "General")
 	FCBWebView2PerformanceSettings Performance;
+
+	/** Keyboard focus and routing policy. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
+	FCBWebView2InputSettings Input;
 
 	/** World-space output defaults. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "World")

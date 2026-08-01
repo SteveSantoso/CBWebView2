@@ -1598,13 +1598,40 @@ HRESULT FWebView2Window::OnAcceleratorKeyPressedInternal(ICoreWebView2Controller
 	UINT VirtualKey = 0;
 	Args->get_VirtualKey(&VirtualKey);
 
+	UINT HostMessage = 0;
 	if (EventKind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN)
 	{
-		::PostMessageW(ParentWindow, WM_KEYDOWN, VirtualKey, 0);
+		HostMessage = WM_KEYDOWN;
 	}
 	else if (EventKind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP)
 	{
-		::PostMessageW(ParentWindow, WM_KEYUP, VirtualKey, 0);
+		HostMessage = WM_KEYUP;
+	}
+	else if (EventKind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
+	{
+		HostMessage = WM_SYSKEYDOWN;
+	}
+	else if (EventKind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP)
+	{
+		HostMessage = WM_SYSKEYUP;
+	}
+
+	const UWebView2Settings* Settings = UWebView2Settings::Get();
+	const FKey SlateKey = FInputKeyManager::Get().GetKeyFromCodes(VirtualKey, 0);
+	const bool bReservedForUnreal =
+		Settings &&
+		SlateKey.IsValid() &&
+		Settings->Input.KeysAlwaysRoutedToUnreal.Contains(SlateKey);
+	if (bReservedForUnreal)
+	{
+		// Stop the browser from acting on the key, then repost it to the Unreal host where Slate/gameplay
+		// input can process it. This also covers keys that arrive directly through Chromium's HWND path.
+		Args->put_Handled(true);
+	}
+
+	if (HostMessage != 0 && ParentWindow)
+	{
+		::PostMessageW(ParentWindow, HostMessage, VirtualKey, 0);
 	}
 
 	return S_OK;

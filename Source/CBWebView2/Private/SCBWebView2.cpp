@@ -1,9 +1,11 @@
 // Copyright 2026-Present SteveSantoso. All Rights Reserved.
 #include "SCBWebView2.h"
 
+#include "CBWebView2KeyboardRouter.h"
 #include "WebView2CompositionHost.h"
 #include "WebView2InternalMessage.h"
 #include "WebView2Manager.h"
+#include "WebView2NativeFocus.h"
 #include "WebView2Settings.h"
 #include "WebView2Subsystem.h"
 
@@ -450,6 +452,10 @@ void SCBWebView2::SetWebViewVisibility(ESlateVisibility InVisibility)
 	SetVisibility(SlateVisibility);
 	if (ShouldReleaseInputForWebViewVisibility(InVisibility))
 	{
+		if (HasMouseCapture() && FSlateApplication::IsInitialized())
+		{
+			FSlateApplication::Get().ReleaseAllPointerCapture();
+		}
 		ReleaseWebViewInputFocus();
 	}
 }
@@ -511,7 +517,18 @@ FVector2D SCBWebView2::ComputeDesiredSize(float LayoutScaleMultiplier) const
 	if (WebViewWindow.IsValid())
 	{
 		const RECT Bounds = WebViewWindow->GetBounds();
-		return FVector2D(Bounds.right - Bounds.left, Bounds.bottom - Bounds.top);
+		const FVector2D BrowserPixelSize(Bounds.right - Bounds.left, Bounds.bottom - Bounds.top);
+		if (BrowserPixelSize.X > 0.0f && BrowserPixelSize.Y > 0.0f)
+		{
+			// Native bounds are physical pixels, while Slate desired sizes are always logical units.
+			const float SlateScale = FMath::Max(CurrentSlateScale, UE_SMALL_NUMBER);
+			FVector2D LogicalSize = BrowserPixelSize / SlateScale;
+			if (bShowAddressBar || bShowControls)
+			{
+				LogicalSize.Y += ToolbarHeight;
+			}
+			return LogicalSize;
+		}
 	}
 
 	return FVector2D(640.0f, 360.0f);
@@ -532,17 +549,21 @@ FReply SCBWebView2::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointe
 
 	if (WebViewWindow.IsValid())
 	{
-		// When interactive web content is hit, forward the native mouse down and claim Slate keyboard focus.
+		// Mouse interaction and keyboard ownership are intentionally independent. Ordinary page content may
+		// receive the click without taking WASD/editor shortcuts away from Unreal.
 		if (ShouldUseSlateMouseForwarding())
 		{
 			const FVector2D LocalPoint = GetLocalWebViewPoint(MyGeometry, MouseEvent.GetScreenSpacePosition());
 			WebViewWindow->SendMouseButton(LocalPoint, MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton, true);
 		}
-		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
+
+		FReply Reply = FReply::Handled().CaptureMouse(SharedThis(this));
+		if (ShouldForwardKeyboardInput())
 		{
-			Subsystem->SetWebViewFocused(true);
+			AcquireWebViewInputFocus(EFocusCause::Mouse);
+			Reply.SetUserFocus(SharedThis(this), EFocusCause::Mouse);
 		}
-		return FReply::Handled().CaptureMouse(SharedThis(this)).SetUserFocus(SharedThis(this), EFocusCause::Mouse);
+		return Reply;
 	}
 
 	return FReply::Unhandled();
@@ -621,44 +642,26 @@ FReply SCBWebView2::OnMouseWheel(const FGeometry& MyGeometry, const FPointerEven
 
 FReply SCBWebView2::OnFocusReceived(const FGeometry& MyGeometry, const FFocusEvent& InFocusEvent)
 {
-	if (WebViewWindow.IsValid())
+	if (!ShouldForwardKeyboardInput())
 	{
-		// Once Slate gains focus, synchronize actual input focus to the underlying WebView.
-		SetVisibility(EVisibility::Visible);
-		WebViewWindow->MoveFocus(true);
-		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
-		{
-			Subsystem->SetWebViewFocused(true);
-		}
+		ReleaseWebViewInputFocus();
+		return FReply::Unhandled();
 	}
 
+	AcquireWebViewInputFocus(InFocusEvent.GetCause());
 	return FReply::Handled();
 }
 
 void SCBWebView2::OnFocusLost(const FFocusEvent& InFocusEvent)
 {
 	const bool bIsMouseDrivenFocusChange = InFocusEvent.GetCause() == EFocusCause::Mouse;
-	const bool bShouldPreserveWebViewFocus =
-		(bIsEditableElementFocused) ||
-		(bIsMouseDrivenFocusChange &&
-			FSlateApplication::IsInitialized() &&
-			bHasCachedPaintGeometry &&
-			CachedPaintGeometry.IsUnderLocation(FSlateApplication::Get().GetCursorPos()));
+	const bool bCursorInside =
+		FSlateApplication::IsInitialized() &&
+		bHasCachedPaintGeometry &&
+		CachedPaintGeometry.IsUnderLocation(FSlateApplication::Get().GetCursorPos());
+	const bool bExternalMouseFocusLoss = bIsMouseDrivenFocusChange && !bCursorInside;
+	bool bNativeWebViewOwnsFocus = false;
 
-	if (bShouldPreserveWebViewFocus)
-	{
-		// While a page input is actively being edited, do not call MoveFocus(false) or reset subsystem focus state.
-		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
-		{
-			Subsystem->SetWebViewFocused(true);
-		}
-		SCompoundWidget::OnFocusLost(InFocusEvent);
-		return;
-	}
-
-	// If Win32 focus is still inside the host window subtree, including WebView2 or IME child HWNDs,
-	// then page input or IME still owns focus. Do not call MoveFocus(false) to steal it back,
-	// or the text box can lose focus on the first frame after being clicked.
 #if PLATFORM_WINDOWS
 	{
 		const HWND CurrentNativeFocus = ::GetFocus();
@@ -681,40 +684,26 @@ void SCBWebView2::OnFocusLost(const FFocusEvent& InFocusEvent)
 			}
 		}
 
-		if (HostHwnd && CurrentNativeFocus &&
-			(CurrentNativeFocus == HostHwnd || ::IsChild(HostHwnd, CurrentNativeFocus)))
-		{
-			if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
-			{
-				Subsystem->SetWebViewFocused(true);
-			}
-			SCompoundWidget::OnFocusLost(InFocusEvent);
-			return;
-		}
+		bNativeWebViewOwnsFocus = CBWebView2NativeFocus::IsWebView2OwnedWindow(CurrentNativeFocus, HostHwnd);
 	}
 #endif
 
-	const bool bCanApplyHoverVisibility = !WebViewWindow.IsValid() || WebViewWindow->GetVisible() == ESlateVisibility::Visible;
-	if (WebViewWindow.IsValid())
+	const bool bShouldPreserveWebViewFocus =
+		ShouldForwardKeyboardInput() &&
+		!bExternalMouseFocusLoss &&
+		(bCursorInside || bNativeWebViewOwnsFocus);
+	if (bShouldPreserveWebViewFocus)
 	{
-		WebViewWindow->MoveFocus(false);
-
-		if (TSharedPtr<SWindow> CurrentWindow = FSlateApplication::Get().GetActiveTopLevelWindow())
-		{
-			if (CurrentWindow->GetNativeWindow().IsValid())
-			{
-				if (void* NativeHandle = CurrentWindow->GetNativeWindow()->GetOSWindowHandle())
-				{
-					::SetFocus(static_cast<HWND>(NativeHandle));
-				}
-			}
-		}
-
 		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
 		{
-			Subsystem->SetWebViewFocused(false);
+			Subsystem->SetWebViewFocused(true);
 		}
+		SCompoundWidget::OnFocusLost(InFocusEvent);
+		return;
 	}
+
+	const bool bCanApplyHoverVisibility = !WebViewWindow.IsValid() || WebViewWindow->GetVisible() == ESlateVisibility::Visible;
+	ReleaseWebViewInputFocus();
 
 	if (bCanApplyHoverVisibility)
 	{
@@ -731,7 +720,13 @@ bool SCBWebView2::SupportsKeyboardFocus() const
 
 FReply SCBWebView2::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
 {
-	if (bEnableTransparencyHitTest && !bIsHoveringInteractiveContent)
+	if (CBWebView2KeyboardRouting::IsKeyReservedForUnreal(InKeyEvent.GetKey()))
+	{
+		ReleaseWebViewInputFocus();
+		return FReply::Unhandled();
+	}
+
+	if (!ShouldForwardKeyboardInput())
 	{
 		return FReply::Unhandled();
 	}
@@ -757,7 +752,13 @@ FReply SCBWebView2::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKe
 
 FReply SCBWebView2::OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
 {
-	if (bEnableTransparencyHitTest && !bIsHoveringInteractiveContent)
+	if (CBWebView2KeyboardRouting::IsKeyReservedForUnreal(InKeyEvent.GetKey()))
+	{
+		ReleaseWebViewInputFocus();
+		return FReply::Unhandled();
+	}
+
+	if (!ShouldForwardKeyboardInput())
 	{
 		return FReply::Unhandled();
 	}
@@ -778,7 +779,7 @@ FReply SCBWebView2::OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyE
 
 FReply SCBWebView2::OnKeyChar(const FGeometry& MyGeometry, const FCharacterEvent& InCharacterEvent)
 {
-	if (bEnableTransparencyHitTest && !bIsHoveringInteractiveContent)
+	if (!ShouldForwardKeyboardInput())
 	{
 		return FReply::Unhandled();
 	}
@@ -862,10 +863,64 @@ FVector2D SCBWebView2::GetLocalWebViewPoint(const FGeometry& MyGeometry, const F
 	return LocalPoint * MyGeometry.Scale;
 }
 
+bool SCBWebView2::ShouldForwardKeyboardInput() const
+{
+	return CBWebView2KeyboardRouting::ShouldRouteKeysToBrowser(
+		CBWebView2KeyboardRouting::GetDefaultCaptureMode(),
+		bIsEditableElementFocused,
+		bIsHoveringInteractiveContent);
+}
+
+void SCBWebView2::AcquireWebViewInputFocus(EFocusCause FocusCause)
+{
+	if (!ShouldForwardKeyboardInput() || !WebViewWindow.IsValid())
+	{
+		return;
+	}
+
+	static thread_local bool bIsAcquiringFocus = false;
+	if (bIsAcquiringFocus)
+	{
+		return;
+	}
+	TGuardValue<bool> ReentryGuard(bIsAcquiringFocus, true);
+
+	SetVisibility(EVisibility::Visible);
+	if (FSlateApplication::IsInitialized())
+	{
+		FSlateApplication& SlateApplication = FSlateApplication::Get();
+		if (SlateApplication.GetKeyboardFocusedWidget().Get() != this)
+		{
+			SlateApplication.SetKeyboardFocus(SharedThis(this), FocusCause);
+		}
+	}
+
+	WebViewWindow->MoveFocus(true);
+	if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
+	{
+		Subsystem->SetWebViewFocused(true);
+	}
+}
+
 void SCBWebView2::ReleaseWebViewInputFocus()
 {
+	static thread_local bool bIsReleasingFocus = false;
+	if (bIsReleasingFocus)
+	{
+		return;
+	}
+	TGuardValue<bool> ReentryGuard(bIsReleasingFocus, true);
+
+	const bool bHadEditableFocus = bIsEditableElementFocused;
+	bIsEditableElementFocused = false;
 	if (WebViewWindow.IsValid())
 	{
+		if (bHadEditableFocus)
+		{
+			WebViewWindow->ExecuteScript(
+				TEXT("if(document.activeElement && document.activeElement.blur){document.activeElement.blur();}"),
+				nullptr);
+		}
 		WebViewWindow->MoveFocus(false);
 	}
 
@@ -880,11 +935,6 @@ void SCBWebView2::ReleaseWebViewInputFocus()
 	}
 
 	FSlateApplication& SlateApplication = FSlateApplication::Get();
-	if (HasMouseCapture())
-	{
-		SlateApplication.ReleaseAllPointerCapture();
-	}
-
 	const TSharedPtr<SWidget> FocusedWidget = SlateApplication.GetKeyboardFocusedWidget();
 	if (FocusedWidget.Get() == this)
 	{
@@ -904,10 +954,9 @@ void SCBWebView2::ReleaseWebViewInputFocus()
 		{
 			const HWND HostHwnd = static_cast<HWND>(NativeHandle);
 			const HWND CurrentNativeFocus = ::GetFocus();
-			// Pull focus back only when the current system focus is outside the host window subtree,
-			// so page input or IME focus is not stolen away.
-			if (!CurrentNativeFocus ||
-				(CurrentNativeFocus != HostHwnd && !::IsChild(HostHwnd, CurrentNativeFocus)))
+			// Chromium is normally a child of the Unreal HWND. IsChild() therefore cannot decide whether
+			// focus is safe to leave alone; classify the actual WebView2 subtree instead.
+			if (CBWebView2NativeFocus::IsWebView2OwnedWindow(CurrentNativeFocus, HostHwnd))
 			{
 				::SetFocus(HostHwnd);
 			}
@@ -1062,16 +1111,11 @@ void SCBWebView2::BindWebViewEvents()
 	{
 		OnInputActivationRequested.ExecuteIfBound();
 
-		// When native WinComp routing confirms this WebView should own input, proactively acquire Slate keyboard focus.
-		if (!FSlateApplication::IsInitialized())
+		// Native mouse activation must not imply keyboard ownership. Under TextInputOnly the DOM bridge
+		// acquires focus only after it confirms that the click landed in editable content.
+		if (ShouldForwardKeyboardInput())
 		{
-			return;
-		}
-
-		FSlateApplication::Get().SetKeyboardFocus(SharedThis(this), EFocusCause::Mouse);
-		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
-		{
-			Subsystem->SetWebViewFocused(true);
+			AcquireWebViewInputFocus(EFocusCause::Mouse);
 		}
 	});
 
@@ -1125,19 +1169,16 @@ void SCBWebView2::HandleMessageFromWeb(const FString& Message)
 	bool bNewEditableFocusState = false;
 	if (FCBWebView2InternalMessageParser::TryReadLegacyBoolMessage(RoutedMessage, *EditableFocusPrefix, bNewEditableFocusState))
 	{
-		if (bIsEditableElementFocused != bNewEditableFocusState)
+		// Reconcile on every report, not only transitions. A normal page click can leave Chromium's native
+		// child HWND focused even when the DOM state was already false.
+		bIsEditableElementFocused = bNewEditableFocusState;
+		if (ShouldForwardKeyboardInput())
 		{
-			bIsEditableElementFocused = bNewEditableFocusState;
-
-			if (bNewEditableFocusState && FSlateApplication::IsInitialized())
-			{
-				// A page input just gained focus: proactively claim Slate keyboard focus so subsequent keys forward to the WebView.
-				FSlateApplication::Get().SetKeyboardFocus(SharedThis(this), EFocusCause::Mouse);
-				if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
-				{
-					Subsystem->SetWebViewFocused(true);
-				}
-			}
+			AcquireWebViewInputFocus(EFocusCause::Mouse);
+		}
+		else
+		{
+			ReleaseWebViewInputFocus();
 		}
 	}
 
@@ -1176,41 +1217,7 @@ void SCBWebView2::HandleMessageFromWeb(const FString& Message)
 			// 3. clear Slate keyboard focus and return it to the upper viewport
 			if (!bNewHoverState)
 			{
-				if (WebViewWindow.IsValid())
-				{
-					WebViewWindow->ExecuteScript(
-						TEXT("if(document.activeElement && document.activeElement.blur){document.activeElement.blur();}"),
-						nullptr);
-					WebViewWindow->MoveFocus(false);
-				}
-
-				if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
-				{
-					Subsystem->SetWebViewFocused(false);
-				}
-
-				if (FSlateApplication::IsInitialized())
-				{
-					FSlateApplication& SlateApplication = FSlateApplication::Get();
-					if (SlateApplication.GetKeyboardFocusedWidget().Get() == this)
-					{
-						SlateApplication.ClearKeyboardFocus(EFocusCause::Cleared);
-					}
-
-					// Explicitly pull Win32 focus back to the main host window. MoveFocus(false) alone does not change Win32 focus,
-					// so a WebView2 IME child HWND can still own it. UWebView2Subsystem::Tick will not reclaim it because of IsChild,
-					// and keyboard input would continue to be intercepted by WebView2 instead of reaching UE.
-					if (TSharedPtr<SWindow> CurrentWindow = SlateApplication.GetActiveTopLevelWindow())
-					{
-						if (CurrentWindow->GetNativeWindow().IsValid())
-						{
-							if (void* NativeHandle = CurrentWindow->GetNativeWindow()->GetOSWindowHandle())
-							{
-								::SetFocus(static_cast<HWND>(NativeHandle));
-							}
-						}
-					}
-				}
+				ReleaseWebViewInputFocus();
 			}
 		}
 	}

@@ -118,6 +118,7 @@ private:
 	FGuid InstanceId;
 	FIntPoint BrowserPixelSize = FIntPoint::ZeroValue;
 	FGeometry CachedTickGeometry;
+	float CurrentSlateScale = 1.0f;
 	FVector2D LastBrowserDesktopTopLeft = FVector2D::ZeroVector;
 	/**
 	 * Pre-layout browser size. The browser is resized to the real layout size on the first Tick

@@ -3,6 +3,7 @@
 
 #include "WebView2Log.h"
 #include "WebView2Manager.h"
+#include "WebView2NativeFocus.h"
 #include "WebView2Window.h"
 
 #include "DynamicRHI.h"
@@ -525,13 +526,16 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 	{
 		if (HiddenWindow)
 		{
+			if (CBWebView2NativeFocus::ThreadOwnsCaretFor(HiddenWindow))
+			{
+				::DestroyCaret();
+			}
 			DestroyWindow(HiddenWindow);
 			HiddenWindow = nullptr;
 		}
 
 		WindowSize = FIntPoint::ZeroValue;
 		bHasInputScreenAnchor = false;
-		::DestroyCaret();
 	}
 
 	bool TryGetCaretClientPoint(POINT& OutCaretClientPoint, LONG& OutCaretHeight) const
@@ -608,9 +612,10 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 
 		if (bUpdateCaret)
 		{
+			// IME needs an HWND-owned caret and its position, but it does not need the caret to be visible.
+			// Showing this 1 px Win32 caret makes Windows Graphics Capture composite it into the world texture.
 			::CreateCaret(TargetWindow, nullptr, 1, CaretHeight);
 			::SetCaretPos(ClientPoint.x, ClientPoint.y);
-			::ShowCaret(TargetWindow);
 		}
 
 		COMPOSITIONFORM CompositionForm = {};
@@ -740,7 +745,10 @@ struct FWebView2ContinuousTextureSource::FImpl : IHiddenHostWindowOwner
 		bHasInputScreenAnchor = false;
 		bHasExplicitImeCaretAnchor = false;
 		bImeRefreshPending = false;
-		::DestroyCaret();
+		if (HiddenWindow && CBWebView2NativeFocus::ThreadOwnsCaretFor(HiddenWindow))
+		{
+			::DestroyCaret();
+		}
 		MoveWindowOffscreen();
 	}
 
